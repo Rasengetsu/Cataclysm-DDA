@@ -24,6 +24,9 @@
 #include "avatar.h"
 #include "avatar_action.h"
 #include "bodypart.h"
+#include "butchery.h"
+#include "butchery_requirements.h"
+#include "text_snippets.h"
 #include "cached_options.h"
 #include "calendar.h"
 #include "cata_utility.h"
@@ -245,7 +248,9 @@ static const proficiency_id proficiency_prof_lockpicking( "prof_lockpicking" );
 static const proficiency_id proficiency_prof_lockpicking_expert( "prof_lockpicking_expert" );
 static const proficiency_id proficiency_prof_safecracking( "prof_safecracking" );
 
+static const quality_id qual_BUTCHER( "BUTCHER" );
 static const quality_id qual_CUT( "CUT" );
+static const quality_id qual_CUT_FINE( "CUT_FINE" );
 static const quality_id qual_HACK( "HACK" );
 static const quality_id qual_LOCKPICK( "LOCKPICK" );
 static const quality_id qual_PRY( "PRY" );
@@ -8842,6 +8847,88 @@ std::unique_ptr<activity_actor> pulp_activity_actor::deserialize( JsonValue &jsi
     return actor.clone();
 }
 
+void butchery_activity_actor::start( player_activity &act, Character &you )
+{
+    act.moves_total = 1;
+
+    for( butchery_data &b_instance : bd ) {
+        const mtype &corpse = *b_instance.corpse.get_item()->get_mtype();
+
+        std::pair<float, requirement_id> butchery_reqs =
+            corpse.harvest->get_butchery_requirements().get_fastest_requirements( you.crafting_inventory(),
+                    corpse.size, b_instance.b_type );
+        b_instance.req_speed_bonus = butchery_reqs.first;
+        b_instance.req = butchery_reqs.second;
+        b_instance;
+
+        act.moves_total += butcher_time_to_cut( you, *b_instance.corpse.get_item(),
+                                                b_instance.b_type ) * b_instance.req_speed_bonus;
+    }
+
+    act.moves_left = act.moves_total;
+
+    if( !bd.empty() ) {
+        if( !set_up_butchery( act, you, bd.back() ) ) {
+            bd.pop_back();
+        }
+        return;
+    }
+}
+
+void butchery_activity_actor::do_turn( player_activity &act, Character &you )
+{
+
+    if( bd.empty() ) {
+        act.set_to_null();
+        return;
+    }
+
+    map *here = &get_map();
+    butchery_data &b_instance = bd.back();
+    item_location &target = b_instance.corpse;
+
+    // Corpses can disappear (rezzing!), so check for that
+    if( !target || !target->is_corpse() ) {
+        you.add_msg_if_player( m_info, _( "There's no corpse to butcher!" ) );
+        act.set_to_null();
+        return;
+    }
+
+    const butcher_type action = b_instance.b_type;
+    item &corpse_item = *target;
+    b_instance.progress = b_instance.time_to_butcher * corpse_item.get_var( butcher_progress_var(
+                              action ), 0.0f );
+
+    if( b_instance.progress == 0.0f ) {
+        // Dump items from the corpse "container"
+        corpse_item.spill_contents( *&here, target.pos_bub( *here ) );
+    }
+
+    corpse_item.set_var( butcher_progress_var( action ), b_instance.progress );
+
+    if( b_instance.progress >= 1 ) {
+        // this corpse is done, move to the next one
+        destroy_the_carcass( b_instance, you );
+        bd.pop_back();
+    };
+}
+
+void butchery_activity_actor::finish( player_activity &act, Character &you )
+{
+
+    // if it's mutli-tile butchering, then restart the backlog.
+    activity_handlers::resume_for_multi_activities( you );
+
+}
+
+void butchery_activity_actor::serialize( JsonOut &jsout ) const
+{
+}
+
+std::unique_ptr<activity_actor> butchery_activity_actor::deserialize( JsonValue &jsin )
+{
+    return std::unique_ptr<activity_actor>();
+}
 
 void wait_stamina_activity_actor::start( player_activity &act, Character & )
 {
